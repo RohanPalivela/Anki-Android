@@ -23,6 +23,7 @@ import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.activity.addCallback
 import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import com.ichi2.anki.AnkiActivity
@@ -31,6 +32,7 @@ import com.ichi2.anki.R
 import com.ichi2.anki.Reviewer
 import com.ichi2.anki.common.utils.android.showThemedToast
 import com.ichi2.anki.launchCatchingTask
+import com.ichi2.anki.libanki.Collection
 import com.ichi2.anki.libanki.NoteId
 import org.json.JSONArray
 import org.json.JSONObject
@@ -90,6 +92,18 @@ class SpeedrunSessionActivity : AnkiActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Backing out of the flashcard prompt (phase 2) pauses the session
+        // instead of discarding progress, so a partly-finished session resumes
+        // on the next Start — matching desktop, where navigating away mid-review
+        // pauses at phase 2. Phases 1 and 3 own their own back handling in the
+        // study screen (this activity is backgrounded while they run).
+        onBackPressedDispatcher.addCallback(this) {
+            if (!finished && phase == 2) {
+                pause()
+            } else {
+                finish()
+            }
+        }
         buildUi()
         launchCatchingTask {
             if (!Speedrun.hasQuestionBank()) {
@@ -100,6 +114,7 @@ class SpeedrunSessionActivity : AnkiActivity() {
             withCol {
                 caps = Speedrun.sessionCaps(this)
                 loadState(config.getObject(Speedrun.SESSION_STATE_CONFIG_KEY, JSONObject()))
+                pruneStaleQuestionIds(this)
             }
             start()
         }
@@ -202,6 +217,10 @@ class SpeedrunSessionActivity : AnkiActivity() {
     }
 
     private fun showFlashcardPrompt() {
+        // Persist phase-2 progress immediately so leaving the app (back press or
+        // process death) mid-flashcards resumes here, mirroring desktop's
+        // resumable phase 2 (session.py persists a phase=2 state on pause).
+        launchCatchingTask { withCol { config.set(Speedrun.SESSION_STATE_CONFIG_KEY, saveState()) } }
         status.text = getString(R.string.speedrun_session_flashcards_prompt)
         phaseButtons.removeAllViews()
         addButton(R.string.speedrun_session_review_cards) {
@@ -309,18 +328,26 @@ class SpeedrunSessionActivity : AnkiActivity() {
             return
         }
         val correct = practiceCorrect + recapCorrect
-        showThemedToast(
-            this,
-            getString(R.string.speedrun_session_complete) +
-                " " +
-                getString(
-                    R.string.speedrun_session_complete_detail,
-                    answered,
-                    correct,
-                    flashcardsReviewed,
-                ),
-            false,
-        )
+        val message =
+            buildString {
+                append(getString(R.string.speedrun_session_complete))
+                append(" ")
+                append(
+                    getString(
+                        R.string.speedrun_session_complete_detail,
+                        answered,
+                        correct,
+                        flashcardsReviewed,
+                    ),
+                )
+                if (studiedTopics.isNotEmpty()) {
+                    // Mirror desktop: humanize "organic-chemistry" -> "organic chemistry".
+                    val topics = studiedTopics.map { it.replace("-", " ") }.sorted().joinToString(", ")
+                    append(" ")
+                    append(getString(R.string.speedrun_session_complete_topics, topics))
+                }
+            }
+        showThemedToast(this, message, false)
     }
 
     // --- State (de)serialization — identical schema to desktop ----------------
@@ -340,6 +367,65 @@ class SpeedrunSessionActivity : AnkiActivity() {
         recapCorrect = state.optInt("recap_correct", 0)
         flashcardsReviewed = state.optInt("flashcards_reviewed", 0)
         activatedTotal = state.optInt("activated_total", 0)
+    }
+
+    /**
+     * Drop any persisted question ids that no longer exist before resuming.
+     *
+     * Re-importing the bank (e.g. on desktop, then syncing) assigns fresh note
+     * ids, so a synced [Speedrun.SESSION_STATE_CONFIG_KEY] can point at dangling
+     * ids from an older collection state. Serving one would crash the study
+     * screen with "no such note". We prune dangling ids and rebase the resume
+     * index onto the survivors; if the whole persisted batch is stale (a
+     * cross-collection state), we discard the session and start fresh rather
+     * than resuming meaningless progress. Fresh sessions (no persisted ids)
+     * are untouched — [enterPhase1]/[enterPhase3] build their own lists.
+     */
+    private fun pruneStaleQuestionIds(col: Collection) {
+        val hadIds = practiceIds.isNotEmpty() || recapIds.isNotEmpty()
+        if (!hadIds) return
+        val valid = Speedrun.servedQuestionNoteIds(col).toHashSet()
+        val (prunedPractice, newPracticeIndex) = pruneList(practiceIds, practiceIndex, valid)
+        val (prunedRecap, newRecapIndex) = pruneList(recapIds, recapIndex, valid)
+        if (prunedPractice.isEmpty() && prunedRecap.isEmpty()) {
+            // Nothing survived: reset to a clean slate so start() re-enters phase 1.
+            phase = 0
+            practiceIds = mutableListOf()
+            practiceIndex = 0
+            recapIds = mutableListOf()
+            recapIndex = 0
+            studiedTopics.clear()
+            missedTopics.clear()
+            practiceShown.clear()
+            practiceAnswered = 0
+            practiceCorrect = 0
+            recapAnswered = 0
+            recapCorrect = 0
+            flashcardsReviewed = 0
+            activatedTotal = 0
+            return
+        }
+        practiceIds = prunedPractice
+        practiceIndex = newPracticeIndex
+        recapIds = prunedRecap
+        recapIndex = newRecapIndex
+    }
+
+    /** Keep only ids in [valid], rebasing [index] onto the surviving prefix. */
+    private fun pruneList(
+        ids: List<NoteId>,
+        index: Int,
+        valid: Set<NoteId>,
+    ): Pair<MutableList<NoteId>, Int> {
+        val kept = mutableListOf<NoteId>()
+        var newIndex = 0
+        ids.forEachIndexed { i, id ->
+            if (id in valid) {
+                if (i < index) newIndex++
+                kept.add(id)
+            }
+        }
+        return kept to newIndex
     }
 
     private fun saveState(): JSONObject =

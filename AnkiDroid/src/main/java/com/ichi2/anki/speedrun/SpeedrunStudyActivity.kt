@@ -27,6 +27,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.activity.addCallback
 import anki.scheduler.CardAnswer.Rating
 import anki.speedrun.MissReason
 import com.ichi2.anki.AnkiActivity
@@ -91,6 +92,14 @@ class SpeedrunStudyActivity : AnkiActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Back must hand a StudyPhaseResult (resume index, answered/correct
+        // counts, shown ids, involved/missed topics) back to the guided session
+        // so it can pause at the right question. The legacy onBackPressed()
+        // override is not invoked under predictive back on newer Android, which
+        // silently returned RESULT_CANCELED and reset the session to question 1;
+        // the dispatcher callback fires reliably.
+        onBackPressedDispatcher.addCallback(this) { finishWithResult() }
 
         mode = intent.getStringExtra(EXTRA_MODE) ?: MODE_STANDALONE
         val injected = intent.getLongArrayExtra(EXTRA_NOTE_IDS)
@@ -434,11 +443,6 @@ class SpeedrunStudyActivity : AnkiActivity() {
             }
         setResult(RESULT_OK, data)
         finish()
-    }
-
-    @Suppress("OVERRIDE_DEPRECATION")
-    override fun onBackPressed() {
-        finishWithResult()
     }
 
     private fun textView(

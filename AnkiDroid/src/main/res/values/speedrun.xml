@@ -59,6 +59,7 @@
     <string name="speedrun_session_review_cards">Review memory cards</string>
     <string name="speedrun_session_complete">Session complete.</string>
     <string name="speedrun_session_complete_detail">You answered %1$d question(s) (%2$d correct) and reviewed %3$d memory card(s).</string>
+    <string name="speedrun_session_complete_topics">Topics studied: %1$s.</string>
     <string name="speedrun_session_nothing">Nothing to study yet — sync your imported questions first.</string>
 
     <!-- Dashboard reset (native confirm for the WebView reset-profile command) -->
