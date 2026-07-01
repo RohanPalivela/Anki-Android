@@ -458,6 +458,17 @@
             android:exported="false"
             android:configChanges="orientation|screenSize"
             />
+        <!-- Speedrun (MCAT fork): native question study + guided session screens. -->
+        <activity
+            android:name="com.ichi2.anki.speedrun.SpeedrunStudyActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize"
+            />
+        <activity
+            android:name="com.ichi2.anki.speedrun.SpeedrunSessionActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize"
+            />
         <activity
             android:name="com.ichi2.anki.utils.ConfigAwareSingleFragmentActivity"
             android:exported="false"

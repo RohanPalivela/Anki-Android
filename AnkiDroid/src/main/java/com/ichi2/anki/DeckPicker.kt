@@ -1283,6 +1283,14 @@ open class DeckPicker :
                 undo()
                 return true
             }
+            R.id.action_speedrun -> {
+                Timber.i("DeckPicker:: Speedrun (MCAT) pressed")
+                startActivity(
+                    com.ichi2.anki.pages.SpeedrunHomePage
+                        .getIntent(this),
+                )
+                return true
+            }
             R.id.deck_picker_action_filter -> {
                 Timber.i("DeckPicker:: Search button pressed")
                 return true
