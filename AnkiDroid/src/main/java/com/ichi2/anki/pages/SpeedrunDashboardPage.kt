@@ -62,13 +62,17 @@ class SpeedrunDashboardPage : PageFragment() {
     private fun resetProfile() {
         launchCatchingTask {
             withCol {
-                // "Activated" = memory cards no longer suspended. Forget (clears
-                // FSRS history so Memory restarts) then re-suspend, and wipe any
-                // in-progress guided session. Imported content is untouched.
-                val activated = findCards("deck:${Speedrun.FLASHCARDS_DECK_NAME} -is:suspended")
-                if (activated.isNotEmpty()) {
-                    sched.forgetCards(activated)
-                    sched.suspendCards(activated)
+                // Mirror desktop `Speedrun.reset_profile`: forget EVERY
+                // first-principles memory card (clears FSRS history so Memory's
+                // graded count returns to 0 — including cards that were activated
+                // then re-suspended), then re-suspend them all so they start
+                // inert again, and wipe any in-progress guided session. Imported
+                // content (questions + cards) is kept. Selected by the shared
+                // `speedrun-first-principles` tag, exactly like desktop.
+                val cards = findCards("tag:${Speedrun.FIRST_PRINCIPLES_TAG}")
+                if (cards.isNotEmpty()) {
+                    sched.forgetCards(cards)
+                    sched.suspendCards(cards)
                 }
                 config.remove(Speedrun.SESSION_STATE_CONFIG_KEY)
             }
