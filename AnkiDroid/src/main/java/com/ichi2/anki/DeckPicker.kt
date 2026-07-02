@@ -318,6 +318,18 @@ open class DeckPicker :
      */
     private var syncOnResume = false
 
+    /**
+     * Speedrun (MCAT fork): mirror desktop, which lands on the branded home
+     * (`self.moveToState("speedrun")` in `qt/aqt/main.py`) instead of the deck
+     * browser at cold start. This one-shot flag makes AnkiDroid auto-launch
+     * [SpeedrunHomePage] exactly once per fresh launcher start, once the
+     * collection has loaded. It is only armed on a plain launcher open and is
+     * cleared before launching so that returning from the home (which triggers
+     * DeckPicker.onResume) — or rotation / process-death restore — does NOT
+     * relaunch it and trap the user away from the deck picker.
+     */
+    private var shouldLaunchSpeedrunHome = false
+
     private var toolbarSearchItem: MenuItem? = null
     private var toolbarSearchView: AccessibleSearchView? = null
 
@@ -496,6 +508,13 @@ open class DeckPicker :
             Timber.d("launched from introduction activity login: syncing")
             syncOnResume = true
         }
+
+        // Speedrun (MCAT fork): arm the auto-launch of the branded home only on a
+        // fresh, plain launcher open (see [shouldLaunchSpeedrunHome]). Gating on a
+        // null savedInstanceState excludes rotation / process-death restore, and the
+        // launcher-intent check excludes purpose-driven starts routed by IntentHandler
+        // (file/text/image import, shared text, sync, review-a-deck, browser deep link).
+        shouldLaunchSpeedrunHome = savedInstanceState == null && isPlainLauncherStart()
 
         setViewBinding(binding)
         enableToolbar()
@@ -839,6 +858,10 @@ open class DeckPicker :
                             rightPaneWeightKey = PREF_STUDY_OPTIONS_PANE_WEIGHT,
                         )
                     }
+
+                    // Speedrun (MCAT fork): the collection is now loaded, so it's safe
+                    // to open the WebView-backed home on top of the deck picker.
+                    maybeLaunchSpeedrunHome()
                 }
                 is StartupResponse.FatalError -> handleStartupFailure(response.failure)
             }
@@ -1000,6 +1023,37 @@ open class DeckPicker :
             }
 
         viewModel.handleStartup(environment = environment)
+    }
+
+    /**
+     * Speedrun (MCAT fork): true only for a plain launcher open (the same
+     * `ACTION_MAIN` + `CATEGORY_LAUNCHER` intent IntentHandler builds for
+     * [IntentHandler.LaunchType.DEFAULT_START_APP_IF_NEW]). Purpose-driven starts
+     * (import, shared text, sync, review-a-deck, browser deep link) carry a
+     * different action/category and are intentionally excluded so we never hijack
+     * them with the branded home.
+     */
+    private fun isPlainLauncherStart(): Boolean =
+        intent.action == Intent.ACTION_MAIN &&
+            intent.hasCategory(Intent.CATEGORY_LAUNCHER) &&
+            !intent.hasExtra(INTENT_SYNC_FROM_LOGIN)
+
+    /**
+     * Speedrun (MCAT fork): land on the branded home instead of the deck browser,
+     * mirroring desktop's `self.moveToState("speedrun")`. Fires at most once per
+     * fresh launch: the flag is cleared before launching, so returning from
+     * [SpeedrunHomePage] (via its "Decks (standard Anki)" link, which finishes it
+     * and resumes DeckPicker) does not relaunch it. Standard Anki stays reachable
+     * exactly as before.
+     */
+    private fun maybeLaunchSpeedrunHome() {
+        if (!shouldLaunchSpeedrunHome) return
+        shouldLaunchSpeedrunHome = false
+        Timber.i("DeckPicker:: Auto-launching Speedrun (MCAT) home at startup")
+        startActivity(
+            com.ichi2.anki.pages.SpeedrunHomePage
+                .getIntent(this),
+        )
     }
 
     @VisibleForTesting
