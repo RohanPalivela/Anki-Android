@@ -30,5 +30,6 @@ class DummyScheduler(
     override fun answerCard(
         card: Card,
         rating: Rating,
+        fromQueue: Boolean,
     ): Unit = throw Exception("v1/v2 scheduler not supported")
 }

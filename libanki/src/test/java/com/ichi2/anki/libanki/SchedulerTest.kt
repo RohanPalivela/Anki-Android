@@ -62,6 +62,42 @@ open class SchedulerTest : InMemoryAnkiTest() {
         col.sched.answerCard(c!!, Rating.AGAIN)
     }
 
+    /**
+     * Regression: grading a card that isn't at the top of the queue must be
+     * possible via `fromQueue = false` (out-of-band grading, used by the
+     * Speedrun study screen). Without it the backend rejects the answer with
+     * "not at top of queue", leaving the caller stuck.
+     */
+    @Test
+    fun answerCardOutOfQueueSucceedsForNonTopCard() {
+        val first =
+            col.newNote().apply {
+                setItem("Front", "one")
+                setItem("Back", "1")
+            }
+        col.addNote(first)
+        val second =
+            col.newNote().apply {
+                setItem("Front", "two")
+                setItem("Back", "2")
+            }
+        col.addNote(second)
+
+        val topCardId = col.sched.card!!.id
+        val nonTopCardId =
+            (first.cardIds(col) + second.cardIds(col)).first { it != topCardId }
+
+        // The normal queue path requires the card to be at the top.
+        Assert.assertThrows(Exception::class.java) {
+            col.sched.answerCard(col.getCard(nonTopCardId), Rating.GOOD)
+        }
+
+        // Out-of-band grading records the answer regardless of queue position.
+        assertDoesNotThrow {
+            col.sched.answerCard(col.getCard(nonTopCardId), Rating.GOOD, fromQueue = false)
+        }
+    }
+
     @Test
     @Throws(Exception::class)
     fun test_basics() {

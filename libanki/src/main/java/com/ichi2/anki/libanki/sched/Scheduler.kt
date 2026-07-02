@@ -135,14 +135,24 @@ open class Scheduler(
             numberOfAnswersRecorded += 1
         }
 
-    /** Legacy path, used by tests. */
+    /**
+     * Legacy path, used by tests and out-of-band grading.
+     *
+     * [fromQueue] must stay true for the normal reviewer (the card is popped
+     * from the top of the study queue). Pass false to grade a specific card out
+     * of band — the answer still lands in the revlog and updates scheduling, but
+     * the card is not required to be at (and is not removed from) the head of any
+     * cached review queue. Without this, grading a card that isn't at the top of
+     * the queue fails with "not at top of queue".
+     */
     open fun answerCard(
         card: Card,
         rating: Rating,
+        fromQueue: Boolean = true,
     ) {
         val states = col.backend.getSchedulingStates(card.id)
         col.backend.answerCard(
-            buildAnswer(card = card, states = states, rating = rating),
+            buildAnswer(card = card, states = states, rating = rating, fromQueue = fromQueue),
         )
         numberOfAnswersRecorded += 1
         // tests assume the card was mutated
@@ -157,6 +167,7 @@ open class Scheduler(
         card: Card,
         states: SchedulingStates,
         rating: Rating,
+        fromQueue: Boolean = true,
     ): CardAnswer =
         cardAnswer {
             cardId = card.id
@@ -165,6 +176,7 @@ open class Scheduler(
             this.rating = rating
             answeredAtMillis = time.intTimeMS()
             millisecondsTaken = card.timeTaken(col)
+            this.fromQueue = fromQueue
         }
 
     /** Update card to provided state, and remove it from queue. */
