@@ -59,6 +59,14 @@ class SpeedrunSessionActivity : AnkiActivity() {
 
     private lateinit var caps: Speedrun.SessionCaps
 
+    // Optional curriculum scope: a chosen topic and/or concept restricts
+    // Practice (and, transitively via practised concepts, Recap) to that
+    // material. Persisted in the session state so a paused scoped session
+    // resumes scoped. Both null == the top-level smart Start (targets weak
+    // concepts). Parity with desktop session.py.
+    private var scopeTopic: String? = null
+    private var scopeConcept: String? = null
+
     // Persisted state (mirrors session.py fields / JSON keys).
     private var phase = 0
     private var practiceIds = mutableListOf<NoteId>()
@@ -130,8 +138,20 @@ class SpeedrunSessionActivity : AnkiActivity() {
             }
             withCol {
                 caps = Speedrun.sessionCaps(this)
-                loadState(config.getObject(Speedrun.SESSION_STATE_CONFIG_KEY, JSONObject()))
+                val state = config.getObject(Speedrun.SESSION_STATE_CONFIG_KEY, JSONObject())
+                val hadState = state.has("phase")
+                loadState(state)
                 pruneStaleQuestionIds(this)
+                // A pending curriculum scope only applies to a FRESH session; a
+                // paused session resumes with the scope it was started with.
+                // Consume (clear) the pending scope either way. Parity with
+                // desktop start_session.
+                val scope = config.getObject(Speedrun.SESSION_SCOPE_CONFIG_KEY, JSONObject())
+                if (scope.length() > 0) config.remove(Speedrun.SESSION_SCOPE_CONFIG_KEY)
+                if (!hadState && scope.length() > 0) {
+                    scopeTopic = scope.optString("topic").ifEmpty { null }
+                    scopeConcept = scope.optString("concept").ifEmpty { null }
+                }
             }
             start()
         }
@@ -170,10 +190,7 @@ class SpeedrunSessionActivity : AnkiActivity() {
         phase = 1
         launchCatchingTask {
             if (practiceIds.isEmpty()) {
-                practiceIds =
-                    withCol {
-                        Speedrun.servedQuestionsInterleaved(this, unseenFirst = true)
-                    }.take(caps.practice).toMutableList()
+                practiceIds = withCol { buildPracticeIds(this) }.toMutableList()
                 practiceIndex = 0
             }
             if (practiceIds.isEmpty() || practiceIndex >= practiceIds.size) {
@@ -192,6 +209,39 @@ class SpeedrunSessionActivity : AnkiActivity() {
                 ),
             )
         }
+    }
+
+    /**
+     * The (capped) Phase-1 question list, honouring any curriculum scope.
+     * Parity with desktop session.py `_build_practice_ids`.
+     */
+    private fun buildPracticeIds(col: Collection): List<NoteId> {
+        val cap = caps.practice
+        scopeConcept?.let { concept ->
+            val topics = scopeTopic?.let { setOf(it) }
+            var ids =
+                Speedrun.servedQuestionsInterleaved(
+                    col = col,
+                    topics = topics,
+                    concepts = setOf(concept),
+                    unseenFirst = true,
+                )
+            if (ids.isEmpty() && scopeTopic != null) {
+                // Concept too sparse: fall back to the whole topic.
+                ids = Speedrun.servedQuestionsInterleaved(col, topics = setOf(scopeTopic!!), unseenFirst = true)
+            }
+            return ids.take(cap)
+        }
+        scopeTopic?.let { topic ->
+            return Speedrun.servedQuestionsInterleaved(col, topics = setOf(topic), unseenFirst = true).take(cap)
+        }
+        // Unscoped smart Start: target weak/under-covered concepts first.
+        val weak = Speedrun.weakConcepts(col).toSet()
+        if (weak.isNotEmpty()) {
+            val ids = Speedrun.servedQuestionsInterleaved(col, concepts = weak, unseenFirst = true)
+            if (ids.isNotEmpty()) return ids.take(cap)
+        }
+        return Speedrun.servedQuestionsInterleaved(col, unseenFirst = true).take(cap)
     }
 
     private fun onPhase1Result(result: ActivityResult) {
@@ -245,6 +295,14 @@ class SpeedrunSessionActivity : AnkiActivity() {
      */
     private suspend fun maybeRunCoverageSweep() {
         if (swept) return
+        // Skip for a scoped session: the sweep re-activates a spread across ALL
+        // topics, which would pull unrelated cards into a focused concept
+        // session's flashcard phase (the concept's own cards were already
+        // activated by the Phase-1 misses). Parity with desktop.
+        if (scopeTopic != null || scopeConcept != null) {
+            swept = true
+            return
+        }
         val activated =
             try {
                 Speedrun.runCoverageSweep()
@@ -423,6 +481,10 @@ class SpeedrunSessionActivity : AnkiActivity() {
 
     private fun loadState(state: JSONObject) {
         phase = state.optInt("phase", 0)
+        // A persisted scope wins over a freshly requested one so a resumed
+        // session keeps the scope it was started with. Parity with desktop.
+        state.optString("scope_topic").ifEmpty { null }?.let { scopeTopic = it }
+        state.optString("scope_concept").ifEmpty { null }?.let { scopeConcept = it }
         practiceIds = state.optLongArray("practice_ids")
         practiceIndex = state.optInt("practice_index", 0)
         recapIds = state.optLongArray("recap_ids")
@@ -508,6 +570,8 @@ class SpeedrunSessionActivity : AnkiActivity() {
     private fun saveState(): JSONObject =
         JSONObject().apply {
             put("phase", phase)
+            put("scope_topic", scopeTopic ?: JSONObject.NULL)
+            put("scope_concept", scopeConcept ?: JSONObject.NULL)
             put("practice_ids", JSONArray(practiceIds))
             put("practice_index", practiceIndex)
             put("recap_ids", JSONArray(recapIds))

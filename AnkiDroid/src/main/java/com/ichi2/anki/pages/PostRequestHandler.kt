@@ -132,6 +132,18 @@ val collectionMethods =
         "saveCustomColours" to { bytes -> backendIdentity(bytes) },
         // Speedrun (MCAT fork): powers the shared speedrun-home / speedrun-dashboard pages.
         "getMemoryScore" to { bytes -> backend.getMemoryScoreRaw(bytes) },
+        // Speedrun (MCAT fork): curriculum view (read) + scope-for-next-session
+        // write. JSON (not protobuf) so the curriculum layer stays in Kotlin/
+        // Python without a new engine RPC; byte-identical shape to desktop's
+        // speedrun_curriculum / speedrun_set_scope mediasrv handlers.
+        "speedrunCurriculum" to { _ ->
+            com.ichi2.anki.speedrun.Speedrun
+                .curriculumJson(this)
+        },
+        "speedrunSetScope" to { bytes ->
+            com.ichi2.anki.speedrun.Speedrun
+                .setScope(this, bytes)
+        },
     )
 
 suspend fun handleCollectionPostRequest(

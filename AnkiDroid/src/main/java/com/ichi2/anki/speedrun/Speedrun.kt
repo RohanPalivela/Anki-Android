@@ -21,7 +21,11 @@ import com.ichi2.anki.libanki.Collection
 import com.ichi2.anki.libanki.DeckId
 import com.ichi2.anki.libanki.Note
 import com.ichi2.anki.libanki.NoteId
+import com.ichi2.anki.libanki.QueueType
 import com.ichi2.anki.observability.undoableOp
+import org.json.JSONArray
+import org.json.JSONException
+import org.json.JSONObject
 
 /**
  * Speedrun (MCAT fork) — Android port of the reusable pieces of pylib's
@@ -55,12 +59,30 @@ object Speedrun {
 
     // Config keys (must match rslib/src/speedrun/blueprint.rs + pylib).
     const val SESSION_STATE_CONFIG_KEY = "speedrunSessionState"
+
+    /**
+     * Requested scope for the NEXT fresh guided session, set by the curriculum
+     * home when the student taps a topic/concept and consumed (then cleared) by
+     * [SpeedrunSessionActivity] on Start. Shape:
+     * `{"topic": str|null, "concept": str|null}`. Mirrors pylib's
+     * `SESSION_SCOPE_CONFIG_KEY`.
+     */
+    const val SESSION_SCOPE_CONFIG_KEY = "speedrunSessionScope"
+    private const val BLUEPRINT_CONFIG_KEY = "speedrunBlueprint"
     private const val SESSION_PRACTICE_CAP_CONFIG_KEY = "speedrunSessionPracticeCap"
     private const val SESSION_FLASHCARD_CAP_CONFIG_KEY = "speedrunSessionFlashcardCap"
     private const val SESSION_RECAP_CAP_CONFIG_KEY = "speedrunSessionRecapCap"
     private const val DEFAULT_SESSION_PRACTICE_CAP = 10
     private const val DEFAULT_SESSION_FLASHCARD_CAP = 20
     private const val DEFAULT_SESSION_RECAP_CAP = 5
+
+    // Curriculum layer (W4): parity with pylib's Speedrun.curriculum.
+
+    /** Ease values >= this count as a correct answer in the revlog (Good=3). */
+    private const val CORRECT_EASE_CUTOFF = 2
+
+    /** Accuracy at/above which a concept is not prioritised by smart Start. */
+    private const val WEAK_ACCURACY_THRESHOLD = 0.8
 
     /** Suffix used for the `miss::<reason>` note tag (SPOV3 taxonomy). */
     private val missReasonTagSuffix =
@@ -254,5 +276,292 @@ object Speedrun {
             flashcards = cap(SESSION_FLASHCARD_CAP_CONFIG_KEY, DEFAULT_SESSION_FLASHCARD_CAP),
             recap = cap(SESSION_RECAP_CAP_CONFIG_KEY, DEFAULT_SESSION_RECAP_CAP),
         )
+    }
+
+    // --- Curriculum data/API layer (W4) ---------------------------------------
+    //
+    // Byte-for-byte parity with pylib's Speedrun.curriculum: the topic -> concept
+    // structure and every stat are derived from already-synced data (blueprint
+    // config, topic::/concept:: tags, card state, revlog, and the get_memory_score
+    // RPC). Android ships no taxonomy JSON, so concept labels are humanised slugs
+    // (the only cosmetic difference; all structure/stats are identical).
+
+    /** Fallback label for a kebab-case slug (`amino-acids` -> `Amino acids`). */
+    fun humanizeSlug(slug: String): String {
+        val words = slug.replace("-", " ").trim()
+        return if (words.isEmpty()) words else words.replaceFirstChar { it.uppercase() }
+    }
+
+    data class ConceptProgress(
+        val concept: String,
+        val label: String,
+        val topic: String,
+        val servedQuestions: Int,
+        val lessonCards: Int,
+        val answered: Int,
+        val correct: Int,
+        val lessonsActivated: Int,
+        val lessonsReviewed: Int,
+    ) {
+        val accuracy: Double get() = if (answered > 0) correct.toDouble() / answered else 0.0
+        val practiced: Boolean get() = answered > 0
+
+        fun toJson(): JSONObject =
+            JSONObject().apply {
+                put("concept", concept)
+                put("label", label)
+                put("topic", topic)
+                put("servedQuestions", servedQuestions)
+                put("lessonCards", lessonCards)
+                put("answered", answered)
+                put("correct", correct)
+                put("lessonsActivated", lessonsActivated)
+                put("lessonsReviewed", lessonsReviewed)
+                put("accuracy", accuracy)
+                put("practiced", practiced)
+            }
+    }
+
+    data class TopicProgress(
+        val topic: String,
+        val label: String,
+        val weight: Double,
+        val mastery: Double,
+        val masteryKnown: Boolean,
+        val concepts: List<ConceptProgress>,
+        val servedQuestions: Int,
+        val lessonCards: Int,
+        val answered: Int,
+        val correct: Int,
+    ) {
+        val accuracy: Double get() = if (answered > 0) correct.toDouble() / answered else 0.0
+
+        fun toJson(): JSONObject =
+            JSONObject().apply {
+                put("topic", topic)
+                put("label", label)
+                put("weight", weight)
+                put("mastery", mastery)
+                put("masteryKnown", masteryKnown)
+                put("servedQuestions", servedQuestions)
+                put("lessonCards", lessonCards)
+                put("answered", answered)
+                put("correct", correct)
+                put("accuracy", accuracy)
+                put("concepts", JSONArray(concepts.map { it.toJson() }))
+            }
+    }
+
+    data class Curriculum(
+        val topics: List<TopicProgress>,
+        val overallMastery: Double,
+        val masteryAbstained: Boolean,
+    ) {
+        fun toJson(): JSONObject =
+            JSONObject().apply {
+                put("topics", JSONArray(topics.map { it.toJson() }))
+                put("overallMastery", overallMastery)
+                put("masteryAbstained", masteryAbstained)
+            }
+
+        fun concept(slug: String): ConceptProgress? = topics.flatMap { it.concepts }.firstOrNull { it.concept == slug }
+    }
+
+    /**
+     * Build the topic -> concept curriculum with per-concept progress. Pure read;
+     * mirrors pylib's `Speedrun.curriculum` step for step.
+     */
+    fun curriculum(col: Collection): Curriculum {
+        val servedCounts = HashMap<Pair<String, String>, Int>()
+        val conceptTopic = HashMap<String, String>()
+        val cardConcept = HashMap<Long, String>()
+        for (nid in servedQuestionNoteIds(col)) {
+            val note = col.getNote(nid)
+            val topic = topicOfNote(note) ?: ""
+            val concept = conceptOfNote(note) ?: continue
+            assignConceptTopic(conceptTopic, concept, topic)
+            val key = topic to concept
+            servedCounts[key] = (servedCounts[key] ?: 0) + 1
+            for (card in note.cards(col)) cardConcept[card.id] = concept
+        }
+
+        val lessonCards = HashMap<String, Int>()
+        val lessonsActivated = HashMap<String, Int>()
+        val lessonsReviewed = HashMap<String, Int>()
+        for (nid in col.findNotes("tag:$FIRST_PRINCIPLES_TAG")) {
+            val note = col.getNote(nid)
+            val concept = conceptOfNote(note) ?: continue
+            val topic = topicOfNote(note) ?: ""
+            assignConceptTopic(conceptTopic, concept, topic)
+            for (card in note.cards(col)) {
+                lessonCards[concept] = (lessonCards[concept] ?: 0) + 1
+                if (card.queue != QueueType.Suspended) {
+                    lessonsActivated[concept] = (lessonsActivated[concept] ?: 0) + 1
+                }
+                if (card.reps > 0) lessonsReviewed[concept] = (lessonsReviewed[concept] ?: 0) + 1
+            }
+        }
+
+        val (answered, correct) = revlogByConcept(col, cardConcept)
+
+        val byTopic = LinkedHashMap<String, MutableList<ConceptProgress>>()
+        for ((concept, topic) in conceptTopic) {
+            var served = servedCounts[topic to concept] ?: 0
+            if (served == 0) {
+                served = servedCounts.entries.filter { it.key.second == concept }.sumOf { it.value }
+            }
+            val cp =
+                ConceptProgress(
+                    concept = concept,
+                    label = humanizeSlug(concept),
+                    topic = topic,
+                    servedQuestions = served,
+                    lessonCards = lessonCards[concept] ?: 0,
+                    answered = answered[concept] ?: 0,
+                    correct = correct[concept] ?: 0,
+                    lessonsActivated = lessonsActivated[concept] ?: 0,
+                    lessonsReviewed = lessonsReviewed[concept] ?: 0,
+                )
+            byTopic.getOrPut(topic) { mutableListOf() }.add(cp)
+        }
+
+        val memory = col.backend.getMemoryScore()
+        val topicMastery = memory.topicsList.associate { it.topic to (it.mastery.toDouble() to it.known) }
+
+        val weights = LinkedHashMap<String, Double>()
+        val blueprint = col.config.getObject(BLUEPRINT_CONFIG_KEY, JSONObject())
+        blueprint.optJSONArray("topics")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val t = arr.getJSONObject(i)
+                weights[t.getString("name")] = t.optDouble("weight", 0.0)
+            }
+        }
+        val orderedTopics =
+            weights.keys
+                .sortedWith(compareByDescending<String> { weights[it] ?: 0.0 }.thenBy { it })
+                .toMutableList()
+        for (extra in byTopic.keys.sorted()) if (extra !in weights) orderedTopics.add(extra)
+
+        val topics = mutableListOf<TopicProgress>()
+        for (topic in orderedTopics) {
+            val concepts = (byTopic[topic] ?: mutableListOf()).sortedBy { it.concept }
+            if (concepts.isEmpty() && topic !in weights) continue
+            val (mastery, known) = topicMastery[topic] ?: (0.0 to false)
+            topics.add(
+                TopicProgress(
+                    topic = topic,
+                    label = humanizeSlug(topic),
+                    weight = weights[topic] ?: 0.0,
+                    mastery = mastery,
+                    masteryKnown = known,
+                    concepts = concepts,
+                    servedQuestions = concepts.sumOf { it.servedQuestions },
+                    lessonCards = concepts.sumOf { it.lessonCards },
+                    answered = concepts.sumOf { it.answered },
+                    correct = concepts.sumOf { it.correct },
+                ),
+            )
+        }
+
+        return Curriculum(topics, memory.overall.toDouble(), memory.abstained)
+    }
+
+    /** Serialize [curriculum] as JSON bytes for the `speedrunCurriculum` endpoint. */
+    fun curriculumJson(col: Collection): ByteArray = curriculum(col).toJson().toString().toByteArray(Charsets.UTF_8)
+
+    /**
+     * Persist (or clear) the scope for the next guided session. Validates the
+     * requested topic/concept against the collection's own content so a stray
+     * value can never be stored. Mirrors pylib's `speedrun_set_scope`.
+     */
+    fun setScope(
+        col: Collection,
+        bytes: ByteArray,
+    ): ByteArray {
+        val payload =
+            try {
+                JSONObject(String(bytes, Charsets.UTF_8).ifEmpty { "{}" })
+            } catch (e: JSONException) {
+                JSONObject()
+            }
+        val topic = payload.optString("topic").ifEmpty { null }
+        val concept = payload.optString("concept").ifEmpty { null }
+        if (topic == null && concept == null) {
+            col.config.remove(SESSION_SCOPE_CONFIG_KEY)
+            return ByteArray(0)
+        }
+        val curriculum = curriculum(col)
+        val validTopics = curriculum.topics.map { it.topic }.toSet()
+        val validConcepts =
+            curriculum.topics
+                .flatMap { it.concepts }
+                .map { it.concept }
+                .toSet()
+        val scope = JSONObject()
+        if (concept != null && concept in validConcepts) {
+            scope.put("concept", concept)
+            curriculum.concept(concept)?.let { scope.put("topic", it.topic) }
+        } else if (topic != null && topic in validTopics) {
+            scope.put("topic", topic)
+        }
+        if (scope.length() > 0) col.config.set(SESSION_SCOPE_CONFIG_KEY, scope) else col.config.remove(SESSION_SCOPE_CONFIG_KEY)
+        return ByteArray(0)
+    }
+
+    /**
+     * Concept slugs the top-level Start should target first: under-covered or
+     * low-accuracy concepts that have questions to serve. Mirrors pylib's
+     * `weak_concepts`.
+     */
+    fun weakConcepts(
+        col: Collection,
+        limit: Int = 0,
+    ): List<String> {
+        val weak = mutableListOf<ConceptProgress>()
+        for (topic in curriculum(col).topics) {
+            for (c in topic.concepts) {
+                if (c.servedQuestions == 0) continue
+                val underReviewed = c.lessonCards > 0 && c.lessonsReviewed == 0
+                if (!c.practiced || c.accuracy < WEAK_ACCURACY_THRESHOLD || underReviewed) weak.add(c)
+            }
+        }
+        weak.sortWith(compareBy({ it.practiced }, { it.accuracy }, { it.answered }, { it.concept }))
+        val slugs = weak.map { it.concept }
+        return if (limit > 0) slugs.take(limit) else slugs
+    }
+
+    /**
+     * Assign [concept] to [topic] deterministically (lexicographically smallest
+     * topic wins), so both clients group concepts identically. Parity with
+     * pylib's `_assign_concept_topic`.
+     */
+    private fun assignConceptTopic(
+        conceptTopic: MutableMap<String, String>,
+        concept: String,
+        topic: String,
+    ) {
+        val existing = conceptTopic[concept]
+        if (existing == null || topic < existing) conceptTopic[concept] = topic
+    }
+
+    /** Answered/correct tallies per concept from the served-question revlog. */
+    private fun revlogByConcept(
+        col: Collection,
+        cardConcept: Map<Long, String>,
+    ): Pair<Map<String, Int>, Map<String, Int>> {
+        val answered = HashMap<String, Int>()
+        val correct = HashMap<String, Int>()
+        if (cardConcept.isEmpty()) return answered to correct
+        val ids = cardConcept.keys.joinToString(",")
+        col.db.query("select cid, ease from revlog where cid in ($ids)").use { cursor ->
+            while (cursor.moveToNext()) {
+                val cid = cursor.getLong(0)
+                val ease = cursor.getInt(1)
+                val concept = cardConcept[cid] ?: continue
+                answered[concept] = (answered[concept] ?: 0) + 1
+                if (ease >= CORRECT_EASE_CUTOFF) correct[concept] = (correct[concept] ?: 0) + 1
+            }
+        }
+        return answered to correct
     }
 }

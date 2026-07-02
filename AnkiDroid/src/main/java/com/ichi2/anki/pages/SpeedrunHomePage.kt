@@ -30,12 +30,29 @@ import com.ichi2.anki.speedrun.SpeedrunSessionActivity
 class SpeedrunHomePage : PageFragment() {
     override val pagePath = "speedrun-home"
 
+    // The curriculum + Memory snapshot change after a session; reload the page
+    // when the student returns so progress/mastery stay live, mirroring
+    // desktop's `SpeedrunHome.refresh()`. Skip the first resume (the initial
+    // load already fetched fresh data).
+    private var freshlyCreated = true
+
     override val bridgeCommands: Map<String, () -> Unit> =
         mapOf(
             "start" to { onUi { startActivity(SpeedrunSessionActivity.getIntent(requireContext())) } },
             "dashboard" to { onUi { startActivity(SpeedrunDashboardPage.getIntent(requireContext())) } },
             "decks" to { onUi { requireActivity().finish() } },
         )
+
+    override fun onResume() {
+        super.onResume()
+        if (freshlyCreated) {
+            freshlyCreated = false
+            return
+        }
+        // webViewLayout is assigned at the start of onViewCreated, which always
+        // runs before onResume, so it is safe to touch here.
+        webViewLayout.post { webViewLayout.reload() }
+    }
 
     /** Bridge callbacks arrive on the JS bridge thread; UI work must hop to Main. */
     private fun onUi(block: () -> Unit) {
