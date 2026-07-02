@@ -64,8 +64,15 @@ class SpeedrunStudyActivity : AnkiActivity() {
 
     private val shownNoteIds = mutableListOf<NoteId>()
     private val involvedTopics = mutableSetOf<String>()
+    private val involvedConcepts = mutableSetOf<String>()
     private val missedTopics = mutableSetOf<String>()
+
+    // Per-concept recap tallies (concept slug -> count; "" = no-concept bucket)
+    // feeding the deferred, off-UI recap transfer score. Parity with desktop.
+    private val conceptAnswered = mutableMapOf<String, Int>()
+    private val conceptCorrect = mutableMapOf<String, Int>()
     private var currentTopic: String? = null
+    private var currentConcept: String? = null
     private var completed = false
     private var atEnd = false
 
@@ -114,9 +121,13 @@ class SpeedrunStudyActivity : AnkiActivity() {
             index = index.coerceAtMost(noteIds.size)
             afterQuestionsReady()
         } else {
-            // Standalone: load the whole served pool.
+            // Standalone: load the whole served pool with the same anti-repeat
+            // ordering the guided Practice phase uses (never-practised first,
+            // then repeats oldest-review-first). Answering writes a native
+            // review that persists across sessions, so a returning student sees
+            // fresh questions instead of the same fixed front-of-pool batch.
             launchCatchingTask {
-                noteIds = withCol { Speedrun.servedQuestionsInterleaved(this) }.toMutableList()
+                noteIds = withCol { Speedrun.servedQuestionsInterleaved(this, unseenFirst = true) }.toMutableList()
                 afterQuestionsReady()
             }
         }
@@ -253,6 +264,7 @@ class SpeedrunStudyActivity : AnkiActivity() {
                     LoadedQuestion(
                         cardId = note.cards(this).firstOrNull()?.id,
                         topic = Speedrun.topicOfNote(note),
+                        concept = Speedrun.conceptOfNote(note),
                         stem = note.getItem("stem"),
                         options = opts,
                         correctIndex = SpeedrunStudyActivity.correctIndex(note.getItem("correct"), opts.size),
@@ -262,11 +274,13 @@ class SpeedrunStudyActivity : AnkiActivity() {
                 }
             currentCardId = q.cardId
             currentTopic = q.topic
+            currentConcept = q.concept
             currentCorrectIndex = q.correctIndex
             explanation = q.explanation
             source = q.source
             if (noteId !in shownNoteIds) shownNoteIds.add(noteId)
             q.topic?.let { involvedTopics.add(it) }
+            q.concept?.let { involvedConcepts.add(it) }
 
             progressLabel.text = getString(com.ichi2.anki.R.string.speedrun_study_progress, index + 1, noteIds.size)
             topicLabel.text = getString(com.ichi2.anki.R.string.speedrun_study_topic, q.topic ?: "—")
@@ -308,14 +322,23 @@ class SpeedrunStudyActivity : AnkiActivity() {
         val cid = currentCardId!!
         launchCatchingTask {
             // Native review write (Again=incorrect, Good=correct) -> revlog.
+            // Graded out of queue (fromQueue = false): the question card is
+            // fetched by note id, not served from the study queue, so a stale
+            // review queue would otherwise reject this with "not at top of
+            // queue" and leave the screen stuck.
             withCol {
                 val card = getCard(cid)
                 card.startTimer()
-                sched.answerCard(card, if (isCorrect) Rating.GOOD else Rating.AGAIN)
+                sched.answerCard(card, if (isCorrect) Rating.GOOD else Rating.AGAIN, fromQueue = false)
             }
             answeredCount++
+            // Per-concept tally for the (deferred) recap transfer score. Bucket
+            // concept-less questions under "" so overall accuracy still counts.
+            val conceptKey = currentConcept ?: ""
+            conceptAnswered[conceptKey] = (conceptAnswered[conceptKey] ?: 0) + 1
             if (isCorrect) {
                 correctCount++
+                conceptCorrect[conceptKey] = (conceptCorrect[conceptKey] ?: 0) + 1
                 resultLabel.text = getString(com.ichi2.anki.R.string.speedrun_study_correct)
                 resultLabel.setTextColor(Color.parseColor("#2e7d32"))
             } else {
@@ -330,10 +353,14 @@ class SpeedrunStudyActivity : AnkiActivity() {
             explanationLabel.text = "${getString(com.ichi2.anki.R.string.speedrun_study_explanation)}: $expl"
             explanationLabel.visibility = View.VISIBLE
 
-            if (isCorrect) {
-                nextButton.visibility = View.VISIBLE
-            } else {
+            // RECAP never offers the miss chooser (its only activation path), so
+            // a wrong recap answer just reveals the explanation + a Next button:
+            // same material re-tested, zero activation / card-unlocking side
+            // effects. Parity with desktop's offers_activation gate.
+            if (offersActivation(mode, isCorrect)) {
                 missContainer.visibility = View.VISIBLE
+            } else {
+                nextButton.visibility = View.VISIBLE
             }
             updateTally()
         }
@@ -430,15 +457,24 @@ class SpeedrunStudyActivity : AnkiActivity() {
 
     private fun finishWithResult() {
         val resumeIndex = if (answeredCurrent) index + 1 else index
+        // Per-concept tallies travel as parallel key/count arrays so the
+        // session can rebuild the maps it persists (concept -> answered/correct).
+        val conceptKeys = conceptAnswered.keys.toTypedArray()
+        val answeredValues = conceptKeys.map { conceptAnswered[it] ?: 0 }.toIntArray()
+        val correctValues = conceptKeys.map { conceptCorrect[it] ?: 0 }.toIntArray()
         val data =
             Intent().apply {
                 putExtra(RESULT_COMPLETED, completed)
                 putExtra(RESULT_SHOWN_NOTE_IDS, shownNoteIds.toLongArray())
                 putExtra(RESULT_INVOLVED_TOPICS, involvedTopics.toTypedArray())
+                putExtra(RESULT_INVOLVED_CONCEPTS, involvedConcepts.toTypedArray())
                 putExtra(RESULT_MISSED_TOPICS, missedTopics.toTypedArray())
                 putExtra(RESULT_ANSWERED, answeredCount)
                 putExtra(RESULT_CORRECT, correctCount)
                 putExtra(RESULT_ACTIVATED, activatedTotal)
+                putExtra(RESULT_CONCEPT_KEYS, conceptKeys)
+                putExtra(RESULT_CONCEPT_ANSWERED, answeredValues)
+                putExtra(RESULT_CONCEPT_CORRECT, correctValues)
                 putExtra(RESULT_RESUME_INDEX, resumeIndex)
             }
         setResult(RESULT_OK, data)
@@ -470,11 +506,28 @@ class SpeedrunStudyActivity : AnkiActivity() {
         const val RESULT_COMPLETED = "completed"
         const val RESULT_SHOWN_NOTE_IDS = "shownNoteIds"
         const val RESULT_INVOLVED_TOPICS = "involvedTopics"
+        const val RESULT_INVOLVED_CONCEPTS = "involvedConcepts"
         const val RESULT_MISSED_TOPICS = "missedTopics"
         const val RESULT_ANSWERED = "answered"
         const val RESULT_CORRECT = "correct"
         const val RESULT_ACTIVATED = "activated"
+        const val RESULT_CONCEPT_KEYS = "conceptKeys"
+        const val RESULT_CONCEPT_ANSWERED = "conceptAnswered"
+        const val RESULT_CONCEPT_CORRECT = "conceptCorrect"
         const val RESULT_RESUME_INDEX = "resumeIndex"
+
+        /**
+         * Whether a wrong answer in [mode] should offer the miss-reason chooser
+         * (the only path that can unsuspend/activate linked cards). RECAP
+         * returns false: it re-tests the *same material*, so a wrong recap
+         * answer only reveals the explanation — no activation, no new cards
+         * unlocked. Grading via the native answer path still happens either way.
+         * Mirrors desktop `offers_activation`.
+         */
+        fun offersActivation(
+            mode: String,
+            isCorrect: Boolean,
+        ): Boolean = !isCorrect && mode != MODE_RECAP
 
         private val MISS_BUTTONS =
             listOf(
@@ -526,6 +579,7 @@ class SpeedrunStudyActivity : AnkiActivity() {
 private data class LoadedQuestion(
     val cardId: CardId?,
     val topic: String?,
+    val concept: String?,
     val stem: String,
     val options: List<String>,
     val correctIndex: Int,

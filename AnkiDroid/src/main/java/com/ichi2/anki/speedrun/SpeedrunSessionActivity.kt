@@ -36,6 +36,7 @@ import com.ichi2.anki.libanki.Collection
 import com.ichi2.anki.libanki.NoteId
 import org.json.JSONArray
 import org.json.JSONObject
+import timber.log.Timber
 
 /**
  * Guided Speedrun session on Android — the fixed Practice → Memory flashcards →
@@ -65,14 +66,30 @@ class SpeedrunSessionActivity : AnkiActivity() {
     private var recapIds = mutableListOf<NoteId>()
     private var recapIndex = 0
     private val studiedTopics = sortedSetOf<String>()
+
+    // Fine-grained concepts practised in Phase 1 — the concrete material just
+    // studied. Recap is scoped to these so it re-tests the same material with
+    // different phrasing (see [enterPhase3]). Parity with desktop.
+    private val practicedConcepts = sortedSetOf<String>()
     private val missedTopics = sortedSetOf<String>()
     private val practiceShown = sortedSetOf<Long>()
     private var practiceAnswered = 0
     private var practiceCorrect = 0
     private var recapAnswered = 0
     private var recapCorrect = 0
+
+    // Per-concept recap tallies (concept slug -> count; "" = no-concept bucket)
+    // persisted for the deferred, off-UI recap transfer score. Parity keys with
+    // desktop: recap_concept_answered / recap_concept_correct.
+    private val recapConceptAnswered = mutableMapOf<String, Int>()
+    private val recapConceptCorrect = mutableMapOf<String, Int>()
     private var flashcardsReviewed = 0
     private var activatedTotal = 0
+
+    // Whether this session has already auto-run its coverage sweep (once per
+    // session, at the Practice→Flashcards hand-off). Persisted so a resumed
+    // session doesn't sweep again on every Start. Parity with desktop.
+    private var swept = false
 
     private var finished = false
     private var flashcardsDueBefore = 0
@@ -180,6 +197,7 @@ class SpeedrunSessionActivity : AnkiActivity() {
     private fun onPhase1Result(result: ActivityResult) {
         val r = StudyResult.from(result)
         studiedTopics.addAll(r.involvedTopics)
+        practicedConcepts.addAll(r.involvedConcepts)
         missedTopics.addAll(r.missedTopics)
         practiceShown.addAll(r.shownNoteIds)
         practiceAnswered += r.answered
@@ -197,6 +215,10 @@ class SpeedrunSessionActivity : AnkiActivity() {
     private fun enterPhase2() {
         phase = 2
         launchCatchingTask {
+            // Auto-run the coverage sweep once per session at the
+            // Practice→Flashcards hand-off so activation coverage grows across
+            // all blueprint topics without the student pressing "Run sweep".
+            maybeRunCoverageSweep()
             val deckId = withCol { Speedrun.flashcardsDeckId(this) }
             if (deckId == null) {
                 enterPhase3()
@@ -214,6 +236,29 @@ class SpeedrunSessionActivity : AnkiActivity() {
             flashcardsDueBefore = due
             showFlashcardPrompt()
         }
+    }
+
+    /**
+     * Run the coverage sweep exactly once per session (idempotent on resume),
+     * folding the activated count into the session tally. A sweep failure must
+     * never block the flashcard phase.
+     */
+    private suspend fun maybeRunCoverageSweep() {
+        if (swept) return
+        val activated =
+            try {
+                Speedrun.runCoverageSweep()
+            } catch (e: Exception) {
+                // A sweep failure must never block the flashcard phase. Leave
+                // swept=false and unpersisted so a transient failure retries on
+                // the next entry/launch instead of being skipped forever
+                // (parity with desktop's _maybe_run_coverage_sweep).
+                Timber.w(e, "Speedrun coverage sweep failed; continuing to flashcards")
+                return
+            }
+        swept = true
+        activatedTotal += activated
+        withCol { config.set(Speedrun.SESSION_STATE_CONFIG_KEY, saveState()) }
     }
 
     private fun showFlashcardPrompt() {
@@ -254,11 +299,26 @@ class SpeedrunSessionActivity : AnkiActivity() {
                     if (studiedTopics.isEmpty()) {
                         mutableListOf()
                     } else {
+                        // Recap tests the SAME MATERIAL as Phase 1: scope to the
+                        // concepts just practised (distinct questions of those
+                        // concepts = "same material, different phrasing"),
+                        // excluding the exact Phase-1 items. Concept-less
+                        // questions fall back to the studied topics inside
+                        // servedQuestionsInterleaved, so recap is never empty
+                        // when concept tags are sparse. unseenFirst keeps the
+                        // transfer check on fresh questions. Parity with desktop
+                        // session.py.
+                        //
+                        // NOTE: true paraphrase VARIANTS (rewording the same
+                        // item) are a future content enhancement; concept-
+                        // matched distinct items are today's best equivalent.
                         withCol {
                             Speedrun.servedQuestionsInterleaved(
                                 col = this,
                                 topics = studiedTopics.toSet(),
+                                concepts = practicedConcepts.toSet().ifEmpty { null },
                                 exclude = practiceShown.toSet(),
+                                unseenFirst = true,
                             )
                         }.take(caps.recap).toMutableList()
                     }
@@ -286,7 +346,16 @@ class SpeedrunSessionActivity : AnkiActivity() {
         val r = StudyResult.from(result)
         recapAnswered += r.answered
         recapCorrect += r.correct
-        activatedTotal += r.activated
+        // Recap re-tests the SAME material and MUST NOT activate/unlock cards,
+        // so nothing is folded into activatedTotal here (the study screen also
+        // never offers the miss chooser in recap, so r.activated is 0).
+        // Accumulate per-concept tallies for the deferred recap transfer score.
+        for ((concept, count) in r.conceptAnswered) {
+            recapConceptAnswered[concept] = (recapConceptAnswered[concept] ?: 0) + count
+        }
+        for ((concept, count) in r.conceptCorrect) {
+            recapConceptCorrect[concept] = (recapConceptCorrect[concept] ?: 0) + count
+        }
         if (!r.completed) {
             recapIndex = r.resumeIndex
             pause()
@@ -359,14 +428,18 @@ class SpeedrunSessionActivity : AnkiActivity() {
         recapIds = state.optLongArray("recap_ids")
         recapIndex = state.optInt("recap_index", 0)
         studiedTopics.addAll(state.optStringList("studied_topics"))
+        practicedConcepts.addAll(state.optStringList("practiced_concepts"))
         missedTopics.addAll(state.optStringList("missed_topics"))
         practiceShown.addAll(state.optLongArray("practice_shown"))
         practiceAnswered = state.optInt("practice_answered", 0)
         practiceCorrect = state.optInt("practice_correct", 0)
         recapAnswered = state.optInt("recap_answered", 0)
         recapCorrect = state.optInt("recap_correct", 0)
+        recapConceptAnswered.putAll(state.optIntMap("recap_concept_answered"))
+        recapConceptCorrect.putAll(state.optIntMap("recap_concept_correct"))
         flashcardsReviewed = state.optInt("flashcards_reviewed", 0)
         activatedTotal = state.optInt("activated_total", 0)
+        swept = state.optBoolean("swept", false)
     }
 
     /**
@@ -395,14 +468,18 @@ class SpeedrunSessionActivity : AnkiActivity() {
             recapIds = mutableListOf()
             recapIndex = 0
             studiedTopics.clear()
+            practicedConcepts.clear()
             missedTopics.clear()
             practiceShown.clear()
             practiceAnswered = 0
             practiceCorrect = 0
             recapAnswered = 0
             recapCorrect = 0
+            recapConceptAnswered.clear()
+            recapConceptCorrect.clear()
             flashcardsReviewed = 0
             activatedTotal = 0
+            swept = false
             return
         }
         practiceIds = prunedPractice
@@ -436,14 +513,18 @@ class SpeedrunSessionActivity : AnkiActivity() {
             put("recap_ids", JSONArray(recapIds))
             put("recap_index", recapIndex)
             put("studied_topics", JSONArray(studiedTopics.toList()))
+            put("practiced_concepts", JSONArray(practicedConcepts.toList()))
             put("missed_topics", JSONArray(missedTopics.toList()))
             put("practice_shown", JSONArray(practiceShown.toList()))
             put("practice_answered", practiceAnswered)
             put("practice_correct", practiceCorrect)
             put("recap_answered", recapAnswered)
             put("recap_correct", recapCorrect)
+            put("recap_concept_answered", JSONObject(recapConceptAnswered.toMap()))
+            put("recap_concept_correct", JSONObject(recapConceptCorrect.toMap()))
             put("flashcards_reviewed", flashcardsReviewed)
             put("activated_total", activatedTotal)
+            put("swept", swept)
         }
 
     private fun addButton(
@@ -467,26 +548,50 @@ class SpeedrunSessionActivity : AnkiActivity() {
         val completed: Boolean,
         val shownNoteIds: List<Long>,
         val involvedTopics: List<String>,
+        val involvedConcepts: List<String>,
         val missedTopics: List<String>,
         val answered: Int,
         val correct: Int,
         val activated: Int,
+        val conceptAnswered: Map<String, Int>,
+        val conceptCorrect: Map<String, Int>,
         val resumeIndex: Int,
     ) {
         companion object {
             fun from(result: ActivityResult): StudyResult {
                 val data = result.data
                 if (result.resultCode != RESULT_OK || data == null) {
-                    return StudyResult(false, emptyList(), emptyList(), emptyList(), 0, 0, 0, 0)
+                    return StudyResult(
+                        false,
+                        emptyList(),
+                        emptyList(),
+                        emptyList(),
+                        emptyList(),
+                        0,
+                        0,
+                        0,
+                        emptyMap(),
+                        emptyMap(),
+                        0,
+                    )
                 }
+                // Per-concept tallies arrive as parallel key/count arrays
+                // (see SpeedrunStudyActivity.finishWithResult); zip them back
+                // into the maps the session persists.
+                val conceptKeys = data.getStringArrayExtra(SpeedrunStudyActivity.RESULT_CONCEPT_KEYS)?.toList() ?: emptyList()
+                val answeredValues = data.getIntArrayExtra(SpeedrunStudyActivity.RESULT_CONCEPT_ANSWERED)?.toList() ?: emptyList()
+                val correctValues = data.getIntArrayExtra(SpeedrunStudyActivity.RESULT_CONCEPT_CORRECT)?.toList() ?: emptyList()
                 return StudyResult(
                     completed = data.getBooleanExtra(SpeedrunStudyActivity.RESULT_COMPLETED, false),
                     shownNoteIds = data.getLongArrayExtra(SpeedrunStudyActivity.RESULT_SHOWN_NOTE_IDS)?.toList() ?: emptyList(),
                     involvedTopics = data.getStringArrayExtra(SpeedrunStudyActivity.RESULT_INVOLVED_TOPICS)?.toList() ?: emptyList(),
+                    involvedConcepts = data.getStringArrayExtra(SpeedrunStudyActivity.RESULT_INVOLVED_CONCEPTS)?.toList() ?: emptyList(),
                     missedTopics = data.getStringArrayExtra(SpeedrunStudyActivity.RESULT_MISSED_TOPICS)?.toList() ?: emptyList(),
                     answered = data.getIntExtra(SpeedrunStudyActivity.RESULT_ANSWERED, 0),
                     correct = data.getIntExtra(SpeedrunStudyActivity.RESULT_CORRECT, 0),
                     activated = data.getIntExtra(SpeedrunStudyActivity.RESULT_ACTIVATED, 0),
+                    conceptAnswered = conceptKeys.zip(answeredValues).toMap(),
+                    conceptCorrect = conceptKeys.zip(correctValues).toMap(),
                     resumeIndex = data.getIntExtra(SpeedrunStudyActivity.RESULT_RESUME_INDEX, 0),
                 )
             }
@@ -506,4 +611,13 @@ private fun JSONObject.optLongArray(key: String): MutableList<Long> {
 private fun JSONObject.optStringList(key: String): List<String> {
     val array = optJSONArray(key) ?: return emptyList()
     return List(array.length()) { array.getString(it) }
+}
+
+/** Read a persisted JSON object of concept-slug -> int count (parity with
+ *  desktop's ``recap_concept_answered`` / ``recap_concept_correct`` dicts). */
+private fun JSONObject.optIntMap(key: String): Map<String, Int> {
+    val obj = optJSONObject(key) ?: return emptyMap()
+    val out = mutableMapOf<String, Int>()
+    for (mapKey in obj.keys()) out[mapKey] = obj.getInt(mapKey)
+    return out
 }

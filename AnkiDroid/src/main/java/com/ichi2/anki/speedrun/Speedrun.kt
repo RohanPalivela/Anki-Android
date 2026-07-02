@@ -47,6 +47,7 @@ object Speedrun {
 
     // Tag taxonomy (must match the Rust engine + desktop constants).
     const val TOPIC_TAG_PREFIX = "topic::"
+    const val CONCEPT_TAG_PREFIX = "concept::"
     const val POOL_SERVED_TAG = "pool::served"
     const val POOL_HELDOUT_TAG = "pool::heldout"
     const val MISS_TAG_PREFIX = "miss::"
@@ -81,6 +82,9 @@ object Speedrun {
 
     /** Bare topic name from a note's first `topic::` tag, if any. */
     fun topicOfNote(note: Note): String? = note.tags.firstOrNull { it.startsWith(TOPIC_TAG_PREFIX) }?.removePrefix(TOPIC_TAG_PREFIX)
+
+    /** Bare concept slug from a note's first `concept::` tag, if any. */
+    fun conceptOfNote(note: Note): String? = note.tags.firstOrNull { it.startsWith(CONCEPT_TAG_PREFIX) }?.removePrefix(CONCEPT_TAG_PREFIX)
 
     // --- Gating / engine RPC wrappers (Rust-implemented, shared with desktop) --
 
@@ -141,6 +145,15 @@ object Speedrun {
      * the desirable-difficulty win). Mirrors `served_questions_interleaved`.
      *
      * @param topics restrict to these bare topic names (recap targeting).
+     * @param concepts restrict to these fine-grained `concept::` slugs so recap
+     *   tests the *same material* practised in Phase 1 ("same concepts,
+     *   different phrasing"). A concept-tagged question is kept only when its
+     *   concept is in [concepts]; a question with no concept falls back to the
+     *   [topics] scope so concept-scoped recap is never starved when tags are
+     *   sparse (the bank tags ~82% of served questions). ANDed with [topics].
+     *   NOTE: a *distinct* question of the same concept is today's best "same
+     *   material, different phrasing"; true paraphrase variants are future
+     *   content. Mirrors desktop `served_questions_interleaved(concepts=…)`.
      * @param exclude drop these note ids (keep recap disjoint from practice).
      * @param unseenFirst order never-practised questions ahead of practised
      *   ones (practised sorted oldest-review-first) so a capped batch never
@@ -149,13 +162,21 @@ object Speedrun {
     fun servedQuestionsInterleaved(
         col: Collection,
         topics: Set<String>? = null,
+        concepts: Set<String>? = null,
         exclude: Set<NoteId> = emptySet(),
         unseenFirst: Boolean = false,
     ): List<NoteId> {
         fun inScope(nid: NoteId): String? {
             if (nid in exclude) return null
-            val topic = topicOfNote(col.getNote(nid)) ?: ""
+            val note = col.getNote(nid)
+            val topic = topicOfNote(note) ?: ""
             if (topics != null && topic !in topics) return null
+            if (concepts != null) {
+                val concept = conceptOfNote(note)
+                // Concept-tagged questions must match a practised concept; a
+                // question with no concept falls back to the topic scope above.
+                if (concept != null && concept !in concepts) return null
+            }
             return topic
         }
 
