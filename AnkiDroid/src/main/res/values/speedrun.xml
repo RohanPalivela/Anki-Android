@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ~ Copyright (c) 2026 Rohan Palivela
+  ~
+  ~ This program is free software; you can redistribute it and/or modify it under
+  ~ the terms of the GNU General Public License as published by the Free Software
+  ~ Foundation; either version 3 of the License, or (at your option) any later
+  ~ version.
+  -->
+<resources>
+    <!-- Speedrun (MCAT fork): mirrors ftl/core/speedrun.ftl for the native
+         Android study/session UI. The WebView home/dashboard pages get their
+         strings from the shared backend translations, not from here. -->
+
+    <!-- Entry point -->
+    <string name="speedrun_menu">Speedrun (MCAT)</string>
+    <string name="speedrun_close">Close</string>
+
+    <!-- Question-first study loop -->
+    <string name="speedrun_study_title">Speedrun — Question-first study</string>
+    <string name="speedrun_study_no_questions">No served questions found. Sync from a device where you imported the question bank.</string>
+    <string name="speedrun_study_progress">Question %1$d of %2$d</string>
+    <string name="speedrun_study_topic">Topic: %1$s</string>
+    <string name="speedrun_study_correct">✓ Correct</string>
+    <string name="speedrun_study_incorrect">✗ Incorrect</string>
+    <string name="speedrun_study_explanation">Explanation</string>
+    <string name="speedrun_study_why_missed">Why did you miss it?</string>
+    <string name="speedrun_study_next">Next question</string>
+    <string name="speedrun_study_finished">You\'ve reached the end of the served questions.</string>
+    <plurals name="speedrun_study_activated">
+        <item quantity="one">Activated %1$d linked card.</item>
+        <item quantity="other">Activated %1$d linked cards.</item>
+    </plurals>
+    <string name="speedrun_study_none_activated">No cards activated — this reason isn\'t a memory gap.</string>
+    <string name="speedrun_study_already_active">No new cards — this topic\'s linked cards are already active.</string>
+    <string name="speedrun_study_no_linked_cards">No memory cards are linked to this topic yet.</string>
+    <string name="speedrun_study_tally">Answered %1$d · Correct %2$d · Cards activated %3$d</string>
+    <string name="speedrun_study_run_sweep">Run coverage sweep</string>
+    <string name="speedrun_study_sweep_done">Coverage sweep activated %1$d card(s).</string>
+
+    <!-- Miss reasons -->
+    <string name="speedrun_miss_knowledge_gap">Knowledge gap</string>
+    <string name="speedrun_miss_missing_context">Missing context</string>
+    <string name="speedrun_miss_misunderstanding">Misunderstanding</string>
+    <string name="speedrun_miss_careless">Careless</string>
+
+    <!-- Question-bank gate -->
+    <string name="speedrun_bank_required_title">No questions yet</string>
+    <string name="speedrun_bank_required_body">Speedrun practice uses the imported MCAT question bank. Import it on desktop and sync, then the questions and memory cards appear here automatically.</string>
+
+    <!-- Guided session -->
+    <string name="speedrun_session_practice_title">Practice questions</string>
+    <string name="speedrun_session_recap_title">Recap — transfer check</string>
+    <string name="speedrun_session_continue">Continue</string>
+    <string name="speedrun_session_stop">Stop session</string>
+    <string name="speedrun_session_stopped">Speedrun session stopped.</string>
+    <string name="speedrun_session_paused">Progress saved. Press Start to pick up where you left off.</string>
+    <string name="speedrun_session_flashcards_prompt">Review your activated memory cards, then come back to continue.</string>
+    <string name="speedrun_session_review_cards">Review memory cards</string>
+    <string name="speedrun_session_complete">Session complete.</string>
+    <string name="speedrun_session_complete_detail">You answered %1$d question(s) (%2$d correct) and reviewed %3$d memory card(s).</string>
+    <string name="speedrun_session_complete_topics">Topics studied: %1$s.</string>
+    <string name="speedrun_session_nothing">Nothing to study yet — sync your imported questions first.</string>
+
+    <!-- Dashboard reset (native confirm for the WebView reset-profile command) -->
+    <string name="speedrun_reset_profile_action">Reset profile</string>
+    <string name="speedrun_reset_profile_confirm">Reset your Speedrun progress? This re-suspends every activated memory card and clears their review history, so Memory starts from scratch. Your imported questions and memory cards are kept. This cannot be undone.</string>
+    <string name="speedrun_reset_profile_done">Profile reset. Imported questions and cards were kept.</string>
+</resources>

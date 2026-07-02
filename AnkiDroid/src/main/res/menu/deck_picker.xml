@@ -23,6 +23,11 @@
         ankidroid:showAsAction="never"
         android:visible="false"
         tools:title="Undo X"/>
+    <!-- Speedrun (MCAT fork): opens the shared MCAT home screen. -->
+    <item
+        android:id="@+id/action_speedrun"
+        android:title="@string/speedrun_menu"
+        ankidroid:showAsAction="never"/>
     <item
         android:id="@+id/checks"
         android:title="@string/checks_action"

@@ -130,6 +130,8 @@ val collectionMethods =
         "simulateFsrsWorkload" to { bytes -> simulateFsrsWorkloadRaw(bytes) },
         // https://github.com/ankitects/anki/pull/4326 -> saveCustomColours should be no-op in mobile clients
         "saveCustomColours" to { bytes -> backendIdentity(bytes) },
+        // Speedrun (MCAT fork): powers the shared speedrun-home / speedrun-dashboard pages.
+        "getMemoryScore" to { bytes -> backend.getMemoryScoreRaw(bytes) },
     )
 
 suspend fun handleCollectionPostRequest(

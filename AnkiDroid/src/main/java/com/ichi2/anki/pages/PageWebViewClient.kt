@@ -122,6 +122,9 @@ fun isSvelteKitPage(path: String): Boolean {
         "import-csv",
         "import-page",
         "image-occlusion",
+        // Speedrun (MCAT fork): shared Svelte pages reused verbatim from desktop.
+        "speedrun-home",
+        "speedrun-dashboard",
         -> true
         else -> false
     }
