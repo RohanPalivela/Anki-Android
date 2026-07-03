@@ -132,6 +132,8 @@ val collectionMethods =
         "saveCustomColours" to { bytes -> backendIdentity(bytes) },
         // Speedrun (MCAT fork): powers the shared speedrun-home / speedrun-dashboard pages.
         "getMemoryScore" to { bytes -> backend.getMemoryScoreRaw(bytes) },
+        "getPerformanceScore" to { bytes -> backend.getPerformanceScoreRaw(bytes) },
+        "getReadinessScore" to { bytes -> backend.getReadinessScoreRaw(bytes) },
         // Speedrun (MCAT fork): curriculum view (read) + scope-for-next-session
         // write. JSON (not protobuf) so the curriculum layer stays in Kotlin/
         // Python without a new engine RPC; byte-identical shape to desktop's
